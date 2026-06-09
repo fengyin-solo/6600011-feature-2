@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useEEGStore } from '../store/eeg';
 import { Recording } from '../types';
 
@@ -23,6 +23,110 @@ const formatTime = (ms: number): string => {
   });
 };
 
+type DurationFilter = 'all' | '<1' | '1-5' | '5-15' | '>15';
+type StatusFilter = 'all' | 'focused' | 'relaxed' | 'fatigued' | 'neutral';
+type DateFilter = 'all' | 'today' | '7days' | '30days';
+type SortBy = 'date_desc' | 'date_asc' | 'duration_desc' | 'duration_asc' | 'name_asc';
+
+const DURATION_OPTIONS: { value: DurationFilter; label: string }[] = [
+  { value: 'all', label: '全部时长' },
+  { value: '<1', label: '< 1分钟' },
+  { value: '1-5', label: '1-5分钟' },
+  { value: '5-15', label: '5-15分钟' },
+  { value: '>15', label: '> 15分钟' },
+];
+
+const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
+  { value: 'all', label: '全部状态' },
+  { value: 'focused', label: '专注' },
+  { value: 'relaxed', label: '放松' },
+  { value: 'fatigued', label: '疲劳' },
+  { value: 'neutral', label: '中性' },
+];
+
+const DATE_OPTIONS: { value: DateFilter; label: string }[] = [
+  { value: 'all', label: '全部日期' },
+  { value: 'today', label: '今天' },
+  { value: '7days', label: '近7天' },
+  { value: '30days', label: '近30天' },
+];
+
+const SORT_OPTIONS: { value: SortBy; label: string }[] = [
+  { value: 'date_desc', label: '日期 ↓' },
+  { value: 'date_asc', label: '日期 ↑' },
+  { value: 'duration_desc', label: '时长 ↓' },
+  { value: 'duration_asc', label: '时长 ↑' },
+  { value: 'name_asc', label: '名称 A-Z' },
+];
+
+const STATUS_LABELS: Record<string, string> = {
+  focused: '专注',
+  relaxed: '放松',
+  fatigued: '疲劳',
+  neutral: '中性',
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  focused: '#1976d2',
+  relaxed: '#388e3c',
+  fatigued: '#d32f2f',
+  neutral: '#757575',
+};
+
+const filterSelectStyle: React.CSSProperties = {
+  padding: '4px 8px',
+  border: '1px solid #e0e0e0',
+  borderRadius: '6px',
+  fontSize: '11px',
+  color: '#333',
+  background: '#fff',
+  cursor: 'pointer',
+  outline: 'none',
+};
+
+const getPredominantStatus = (recording: Recording): string => {
+  if (recording.frames.length === 0) return 'neutral';
+  const counts: Record<string, number> = {};
+  for (const frame of recording.frames) {
+    const s = frame.brainState.status;
+    counts[s] = (counts[s] || 0) + 1;
+  }
+  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+};
+
+const matchDurationFilter = (duration: number, filter: DurationFilter): boolean => {
+  const mins = duration / 60;
+  switch (filter) {
+    case 'all': return true;
+    case '<1': return mins < 1;
+    case '1-5': return mins >= 1 && mins < 5;
+    case '5-15': return mins >= 5 && mins < 15;
+    case '>15': return mins >= 15;
+  }
+};
+
+const matchDateFilter = (startTime: number, filter: DateFilter): boolean => {
+  if (filter === 'all') return true;
+  const now = Date.now();
+  const startOfDay = new Date().setHours(0, 0, 0, 0);
+  switch (filter) {
+    case 'today': return startTime >= startOfDay;
+    case '7days': return startTime >= now - 7 * 24 * 3600 * 1000;
+    case '30days': return startTime >= now - 30 * 24 * 3600 * 1000;
+  }
+};
+
+const sortRecordings = (recs: Recording[], sortBy: SortBy): Recording[] => {
+  const sorted = [...recs];
+  switch (sortBy) {
+    case 'date_desc': return sorted.sort((a, b) => b.startTime - a.startTime);
+    case 'date_asc': return sorted.sort((a, b) => a.startTime - b.startTime);
+    case 'duration_desc': return sorted.sort((a, b) => b.duration - a.duration);
+    case 'duration_asc': return sorted.sort((a, b) => a.duration - b.duration);
+    case 'name_asc': return sorted.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+  }
+};
+
 export const RecordingPanel: React.FC = () => {
   const {
     isRecording,
@@ -45,8 +149,24 @@ export const RecordingPanel: React.FC = () => {
   const [recordingName, setRecordingName] = useState('');
   const [showNameDialog, setShowNameDialog] = useState(false);
   const [elapsedTime, setElapsedTime] = useState(0);
+  const [filterDuration, setFilterDuration] = useState<DurationFilter>('all');
+  const [filterStatus, setFilterStatus] = useState<StatusFilter>('all');
+  const [filterDate, setFilterDate] = useState<DateFilter>('all');
+  const [sortBy, setSortBy] = useState<SortBy>('date_desc');
   const timerRef = useRef<number | null>(null);
   const playbackTimerRef = useRef<number | null>(null);
+
+  const filteredRecordings = useMemo(() => {
+    let result = recordings.filter((r: Recording) => {
+      if (!matchDurationFilter(r.duration, filterDuration)) return false;
+      if (filterStatus !== 'all' && getPredominantStatus(r) !== filterStatus) return false;
+      if (!matchDateFilter(r.startTime, filterDate)) return false;
+      return true;
+    });
+    return sortRecordings(result, sortBy);
+  }, [recordings, filterDuration, filterStatus, filterDate, sortBy]);
+
+  const hasActiveFilter = filterDuration !== 'all' || filterStatus !== 'all' || filterDate !== 'all';
 
   useEffect(() => {
     if (isRecording) {
@@ -347,9 +467,71 @@ export const RecordingPanel: React.FC = () => {
           color: '#666',
           marginBottom: '8px',
           fontWeight: 500,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
         }}>
-          历史录制 ({recordings.length})
+          <span>历史录制 ({recordings.length}){hasActiveFilter && ` · 筛选结果 ${filteredRecordings.length}`}</span>
+          {hasActiveFilter && (
+            <button
+              onClick={() => { setFilterDuration('all'); setFilterStatus('all'); setFilterDate('all'); }}
+              style={{
+                padding: '2px 8px',
+                background: '#fff3e0',
+                color: '#e65100',
+                border: '1px solid #ffb74d',
+                borderRadius: '4px',
+                fontSize: '11px',
+                cursor: 'pointer',
+              }}
+            >
+              清除筛选
+            </button>
+          )}
         </div>
+
+        {recordings.length > 0 && (
+          <div style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '6px',
+            marginBottom: '10px',
+            padding: '10px',
+            background: '#fafafa',
+            borderRadius: '8px',
+            border: '1px solid #eee',
+          }}>
+            <select
+              value={filterDuration}
+              onChange={e => setFilterDuration(e.target.value as DurationFilter)}
+              style={filterSelectStyle}
+            >
+              {DURATION_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <select
+              value={filterStatus}
+              onChange={e => setFilterStatus(e.target.value as StatusFilter)}
+              style={filterSelectStyle}
+            >
+              {STATUS_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <select
+              value={filterDate}
+              onChange={e => setFilterDate(e.target.value as DateFilter)}
+              style={filterSelectStyle}
+            >
+              {DATE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <select
+              value={sortBy}
+              onChange={e => setSortBy(e.target.value as SortBy)}
+              style={filterSelectStyle}
+            >
+              {SORT_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+        )}
+
         {recordings.length === 0 ? (
           <div style={{
             padding: '24px',
@@ -361,88 +543,116 @@ export const RecordingPanel: React.FC = () => {
           }}>
             暂无录制记录
           </div>
+        ) : filteredRecordings.length === 0 ? (
+          <div style={{
+            padding: '24px',
+            textAlign: 'center',
+            color: '#999',
+            fontSize: '13px',
+            border: '1px dashed #e0e0e0',
+            borderRadius: '8px',
+          }}>
+            无匹配的录制记录
+          </div>
         ) : (
           <div style={{ maxHeight: '280px', overflow: 'auto' }}>
-            {[...recordings].reverse().map((recording) => (
-              <div
-                key={recording.id}
-                style={{
-                  padding: '12px',
-                  borderRadius: '8px',
-                  border: activeRecording?.id === recording.id
-                    ? '2px solid #1565c0'
-                    : '1px solid #e0e0e0',
-                  marginBottom: '8px',
-                  background: activeRecording?.id === recording.id ? '#e3f2fd' : '#fff',
-                }}
-              >
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'flex-start',
-                  marginBottom: '6px',
-                }}>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{
-                      fontSize: '13px',
-                      fontWeight: 600,
-                      color: '#333',
-                      whiteSpace: 'nowrap',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                    }}>
-                      {recording.name}
+            {filteredRecordings.map((recording) => {
+              const predominantStatus = getPredominantStatus(recording);
+              return (
+                <div
+                  key={recording.id}
+                  style={{
+                    padding: '12px',
+                    borderRadius: '8px',
+                    border: activeRecording?.id === recording.id
+                      ? '2px solid #1565c0'
+                      : '1px solid #e0e0e0',
+                    marginBottom: '8px',
+                    background: activeRecording?.id === recording.id ? '#e3f2fd' : '#fff',
+                  }}
+                >
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'flex-start',
+                    marginBottom: '6px',
+                  }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{
+                        fontSize: '13px',
+                        fontWeight: 600,
+                        color: '#333',
+                        whiteSpace: 'nowrap',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}>
+                        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{recording.name}</span>
+                        <span style={{
+                          fontSize: '10px',
+                          padding: '1px 6px',
+                          borderRadius: '10px',
+                          background: STATUS_COLORS[predominantStatus] + '18',
+                          color: STATUS_COLORS[predominantStatus],
+                          fontWeight: 500,
+                          flexShrink: 0,
+                        }}>
+                          {STATUS_LABELS[predominantStatus]}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: '11px', color: '#999', marginTop: '2px' }}>
+                        {formatTime(recording.startTime)} · {CHANNEL_NAMES[recording.channel] || recording.channel}
+                      </div>
                     </div>
-                    <div style={{ fontSize: '11px', color: '#999', marginTop: '2px' }}>
-                      {formatTime(recording.startTime)} · {CHANNEL_NAMES[recording.channel] || recording.channel}
+                    <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
+                      <button
+                        onClick={() => handlePlayRecording(recording)}
+                        style={{
+                          padding: '4px 10px',
+                          background: activeRecording?.id === recording.id ? '#1565c0' : '#f5f5f5',
+                          color: activeRecording?.id === recording.id ? '#fff' : '#1565c0',
+                          border: 'none',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          fontWeight: 500,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {activeRecording?.id === recording.id ? '回放中' : '▶ 回放'}
+                      </button>
+                      <button
+                        onClick={() => deleteRecording(recording.id)}
+                        style={{
+                          padding: '4px 8px',
+                          background: '#ffebee',
+                          color: '#d32f2f',
+                          border: 'none',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        🗑
+                      </button>
                     </div>
                   </div>
-                  <div style={{ display: 'flex', gap: '4px', flexShrink: 0 }}>
-                    <button
-                      onClick={() => handlePlayRecording(recording)}
-                      style={{
-                        padding: '4px 10px',
-                        background: activeRecording?.id === recording.id ? '#1565c0' : '#f5f5f5',
-                        color: activeRecording?.id === recording.id ? '#fff' : '#1565c0',
-                        border: 'none',
-                        borderRadius: '4px',
-                        fontSize: '11px',
-                        fontWeight: 500,
-                        cursor: 'pointer',
-                      }}
-                    >
-                      {activeRecording?.id === recording.id ? '回放中' : '▶ 回放'}
-                    </button>
-                    <button
-                      onClick={() => deleteRecording(recording.id)}
-                      style={{
-                        padding: '4px 8px',
-                        background: '#ffebee',
-                        color: '#d32f2f',
-                        border: 'none',
-                        borderRadius: '4px',
-                        fontSize: '11px',
-                        cursor: 'pointer',
-                      }}
-                    >
-                      🗑
-                    </button>
+                  <div style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                  }}>
+                    <span style={{ fontSize: '11px', color: '#666' }}>
+                      时长: {formatDuration(recording.duration)} · {recording.frames.length} 帧
+                    </span>
+                    <span style={{ fontSize: '11px', color: '#999' }}>
+                      {recording.channel}
+                    </span>
                   </div>
                 </div>
-                <div style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  alignItems: 'center',
-                }}>
-                  <span style={{ fontSize: '11px', color: '#666' }}>
-                    时长: {formatDuration(recording.duration)} · {recording.frames.length} 帧
-                  </span>
-                  <span style={{ fontSize: '11px', color: '#999' }}>
-                    {recording.channel}
-                  </span>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
